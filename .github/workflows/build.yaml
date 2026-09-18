@@ -29,6 +29,9 @@ jobs:
           - os: macos-latest
             platform: macos-arm64
             ext: ''
+    env:
+      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+      MACOS_NOTARIZE_ACCOUNT: ${{ secrets.MACOS_NOTARIZE_ACCOUNT }}
 
     steps:
       - name: Checkout code
@@ -79,13 +82,11 @@ jobs:
           fi
 
       - name: Notarize macOS app
-        if: runner.os == 'macOS' && secrets.MACOS_CERT_P12 != '' && secrets.MACOS_NOTARIZE_ACCOUNT != ''
+        if: runner.os == 'macOS' && env.MACOS_CERT_P12 != '' && env.MACOS_NOTARIZE_ACCOUNT != ''
         shell: bash
         env:
-          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
           MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
           MACOS_CERT_NAME: ${{ secrets.MACOS_CERT_NAME }}
-          MACOS_NOTARIZE_ACCOUNT: ${{ secrets.MACOS_NOTARIZE_ACCOUNT }}
           MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
           MACOS_NOTARIZE_PASSWORD: ${{ secrets.MACOS_NOTARIZE_PASSWORD }}
         run: |
