@@ -1,0 +1,139 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            ext: ''
+          - os: ubuntu-24.04-arm
+            platform: linux-aarch64
+            ext: ''
+          - os: windows-latest
+            platform: windows-x86_64
+            ext: .exe
+          - os: macos-15-intel
+            platform: macos-x86_64
+            ext: ''
+          - os: macos-latest
+            platform: macos-arm64
+            ext: ''
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Free disk space (Linux)
+        if: matrix.os == 'ubuntu-latest' || matrix.os == 'ubuntu-24.04-arm'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libasound2-dev \
+            libgtk-3-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libfontconfig1-dev
+
+      - name: Build
+        run: cargo build --release --bin eqvis
+
+      - name: Bundle macOS app and collect artifacts
+        shell: bash
+        run: |
+          set -e
+          mkdir -p dist
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            APP="dist/eqvis.app"
+            mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+            cp target/release/eqvis "$APP/Contents/MacOS/eqvis"
+            chmod +x "$APP/Contents/MacOS/eqvis"
+            cp packaging/macos/Info.plist "$APP/Contents/Info.plist"
+            # Ad-hoc sign so the bundle is internally valid (does NOT satisfy Gatekeeper).
+            codesign --force --deep -s - "$APP"
+            (cd dist && ditto -c -k --keepParent eqvis.app eqvis-${{ matrix.platform }}.zip)
+          else
+            cp target/release/eqvis${{ matrix.ext }} dist/eqvis-${{ matrix.platform }}${{ matrix.ext }}
+          fi
+
+      - name: Notarize macOS app
+        if: runner.os == 'macOS' && secrets.MACOS_CERT_P12 != '' && secrets.MACOS_NOTARIZE_ACCOUNT != ''
+        shell: bash
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MACOS_CERT_NAME: ${{ secrets.MACOS_CERT_NAME }}
+          MACOS_NOTARIZE_ACCOUNT: ${{ secrets.MACOS_NOTARIZE_ACCOUNT }}
+          MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+          MACOS_NOTARIZE_PASSWORD: ${{ secrets.MACOS_NOTARIZE_PASSWORD }}
+        run: |
+          set -e
+          APP="dist/eqvis.app"
+          # Import the Developer ID certificate into the keychain.
+          echo "$MACOS_CERT_P12" | base64 --decode > /tmp/eqvis-cert.p12
+          security create-keychain -p eqvis eqvis.keychain
+          security default-keychain -s eqvis.keychain
+          security unlock-keychain -p eqvis eqvis.keychain
+          security import /tmp/eqvis-cert.p12 -k eqvis.keychain -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k eqvis eqvis.keychain
+          # Hardened runtime + sign (required for notarization).
+          codesign --force --deep --options runtime --sign "$MACOS_CERT_NAME" "$APP"
+          # Notarize and staple.
+          xcrun notarytool submit "$APP" \
+            --apple-id "$MACOS_NOTARIZE_ACCOUNT" \
+            --password "$MACOS_NOTARIZE_PASSWORD" \
+            --team-id "$MACOS_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$APP"
+          # Rebuild the zip so the uploaded artifact carries the signature/staple.
+          rm -f dist/eqvis-${{ matrix.platform }}.zip
+          (cd dist && ditto -c -k --keepParent eqvis.app eqvis-${{ matrix.platform }}.zip)
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: eqvis-${{ matrix.platform }}
+          path: |
+            dist/eqvis-${{ matrix.platform }}${{ matrix.ext }}
+            dist/eqvis-${{ matrix.platform }}.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: downloaded-artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: downloaded-artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
